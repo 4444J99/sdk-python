@@ -167,14 +167,43 @@ async def main() -> None:
     # durable Temporal activity.  Pass the same args you'd pass to
     # genai.Client() — the plugin handles http_options for you.
     #
-    # The client is created here (at worker startup, outside the sandbox)
-    # because genai.Client() reads os.environ internally, which Temporal's
-    # workflow sandbox forbids.  Workflows retrieve the pre-built client
-    # via get_gemini_client().
-    plugin = GeminiPlugin(
-        api_key=os.environ["GOOGLE_API_KEY"],
-        start_to_close_timeout=timedelta(seconds=60),
-    )
+    # The client is created at worker startup (outside the sandbox) because
+    # genai.Client() reads os.environ internally, which Temporal's workflow
+    # sandbox forbids.  Workflows retrieve the pre-built client via
+    # get_gemini_client().
+    #
+    # ── Sensitive activity field encryption ────────────────────────────
+    # By default, credential headers (x-goog-api-key, authorization) in
+    # activity inputs are encrypted in Temporal's event history so they're
+    # never visible in plaintext.  Set SENSITIVE_ACTIVITY_FIELDS_ENCRYPTION_KEY in
+    # your environment to enable this:
+    #
+    #   Generate a key (once, store in secret manager):
+    #     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    #
+    # If you don't care about encrypting credentials (e.g. local dev with
+    # a private Temporal server), pass sensitive_activity_fields=None:
+    #
+    #   plugin = GeminiPlugin(
+    #       api_key=os.environ["GOOGLE_API_KEY"],
+    #       sensitive_activity_fields=None,
+    #   )
+    # ─────────────────────────────────────────────────────────────────
+    sensitive_fields_key = os.environ.get("SENSITIVE_ACTIVITY_FIELDS_ENCRYPTION_KEY")
+    if sensitive_fields_key:
+        # Encrypt credential headers in Temporal's event history.
+        plugin = GeminiPlugin(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            sensitive_activity_fields_encryption_key=sensitive_fields_key.encode(),
+            start_to_close_timeout=timedelta(seconds=60),
+        )
+    else:
+        # No encryption — credentials will be visible in the Temporal UI.
+        plugin = GeminiPlugin(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            sensitive_activity_fields=None,
+            start_to_close_timeout=timedelta(seconds=60),
+        )
 
     config = ClientConfig.load_client_connect_config()
     config.setdefault("target_host", "localhost:7233")

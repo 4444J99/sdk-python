@@ -72,6 +72,7 @@ from temporalio.contrib.google_gemini_sdk.workflow import (
 )
 
 __all__ = [
+    "DEFAULT_SENSITIVE_HEADER_KEYS",
     "GeminiAgentWorkflowError",
     "GeminiPlugin",
     "GeminiToolSerializationError",
@@ -91,6 +92,10 @@ __all__ = [
 # never trigger an httpx import.
 def __getattr__(name: str):  # type: ignore[override]
     _lazy = {
+        "DEFAULT_SENSITIVE_HEADER_KEYS": (
+            "temporalio.contrib.google_gemini_sdk._gemini_plugin",
+            "DEFAULT_SENSITIVE_HEADER_KEYS",
+        ),
         "GeminiPlugin": (
             "temporalio.contrib.google_gemini_sdk._gemini_plugin",
             "GeminiPlugin",

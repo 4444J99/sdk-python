@@ -8,15 +8,54 @@ from typing import Any
 
 from temporalio.common import RetryPolicy
 from temporalio.contrib.google_gemini_sdk import _client_store
-from temporalio.contrib.google_gemini_sdk._http_activity import gemini_api_call
+from temporalio.contrib.google_gemini_sdk._http_activity import (
+    HttpRequestData,
+    gemini_api_call,
+)
 from temporalio.contrib.google_gemini_sdk.workflow import GeminiAgentWorkflowError
 from temporalio.contrib.pydantic import (
     PydanticPayloadConverter as _DefaultPydanticPayloadConverter,
 )
-from temporalio.converter import DataConverter, DefaultPayloadConverter
+from typing import Sequence
+
+import temporalio.api.common.v1
+from temporalio.converter import DataConverter, DefaultPayloadConverter, PayloadCodec
 from temporalio.plugin import SimplePlugin
 from temporalio.worker import WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
+
+#: Default set of HTTP header keys that contain credentials and should be
+#: encrypted in Temporal's event history.  Pass to ``sensitive_activity_fields``
+#: to use these defaults, or provide your own set.
+DEFAULT_SENSITIVE_HEADER_KEYS: set[str] = {"x-goog-api-key", "authorization"}
+
+_ENCRYPTION_KEY_HELP = """\
+sensitive_activity_fields_encryption_key must be a Fernet key (44 URL-safe base64 bytes).
+
+To generate one:
+
+  Local dev / quick start:
+    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+  Production:
+    Store the key in a secret manager (e.g. Google Secret Manager, AWS Secrets
+    Manager, HashiCorp Vault) and load it at worker startup.  The same key must
+    be used by every worker and client that reads/writes this Temporal namespace.
+
+Then pass it to GeminiPlugin:
+
+    plugin = GeminiPlugin(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        sensitive_activity_fields_encryption_key=os.environ["SENSITIVE_ACTIVITY_FIELDS_ENCRYPTION_KEY"].encode(),
+    )
+
+If you don't need credential encryption (e.g. local dev with a private Temporal
+server), pass sensitive_activity_fields=None to skip it entirely:
+
+    plugin = GeminiPlugin(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        sensitive_activity_fields=None,
+    )"""
 
 
 class GeminiPlugin(SimplePlugin):
@@ -34,25 +73,36 @@ class GeminiPlugin(SimplePlugin):
     It also:
 
     - Registers the ``gemini_api_call`` activity (the durable HTTP transport).
-    - Configures the Pydantic data converter and sandbox passthrough modules.
+    - Optionally configures a **field-level encryption codec** that encrypts
+      credential headers (``x-goog-api-key``, ``authorization``) within
+      ``HttpRequestData`` payloads so they never appear in plaintext in
+      Temporal's event history.  All other fields remain human-readable.
+    - Configures sandbox passthrough modules.
 
     All ``genai.Client`` constructor arguments (``api_key``, ``vertexai``,
     ``project``, ``credentials``, etc.) are forwarded via ``**kwargs`` — the
-    plugin automatically handles ``http_options``.  If the Gemini SDK adds new
-    constructor parameters in a future release, they are forwarded without
-    any changes to this plugin.
+    plugin automatically handles ``http_options``.
 
-    Example::
+    Example with encryption (recommended for production)::
 
-        plugin = GeminiPlugin(api_key=os.environ["GOOGLE_API_KEY"])
-        client = await Client.connect("localhost:7233", plugins=[plugin])
-        async with Worker(client, task_queue="q", workflows=[MyWorkflow],
-                          activities=[my_tool]):
-            ...
+        plugin = GeminiPlugin(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            sensitive_activity_fields_encryption_key=os.environ["SENSITIVE_ACTIVITY_FIELDS_ENCRYPTION_KEY"].encode(),
+        )
+
+    Example without encryption (local dev with private Temporal server)::
+
+        plugin = GeminiPlugin(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            sensitive_activity_fields=None,
+        )
 
     Vertex AI example::
 
-        plugin = GeminiPlugin(vertexai=True, project="my-project", location="us-central1")
+        plugin = GeminiPlugin(
+            vertexai=True, project="my-project", location="us-central1",
+            sensitive_activity_fields_encryption_key=os.environ["SENSITIVE_ACTIVITY_FIELDS_ENCRYPTION_KEY"].encode(),
+        )
     """
 
     def __init__(
@@ -63,6 +113,9 @@ class GeminiPlugin(SimplePlugin):
         schedule_to_close_timeout: timedelta | None = None,
         heartbeat_timeout: timedelta | None = None,
         retry_policy: RetryPolicy | None = None,
+        # ── Sensitive activity field encryption ──────────────────────────
+        sensitive_activity_fields: set[str] | None = DEFAULT_SENSITIVE_HEADER_KEYS,
+        sensitive_activity_fields_encryption_key: bytes | None = None,
         # ── genai.Client constructor args ────────────────────────────────
         # Forwarded directly to genai.Client().  The plugin adds
         # http_options automatically — do NOT pass it here.
@@ -80,6 +133,16 @@ class GeminiPlugin(SimplePlugin):
             heartbeat_timeout: Maximum time between heartbeats for model HTTP
                 call activities.
             retry_policy: Retry policy for failed model HTTP call activities.
+            sensitive_activity_fields: Set of HTTP header keys to encrypt in
+                Temporal's event history.  Defaults to
+                ``DEFAULT_SENSITIVE_HEADER_KEYS`` (``{"x-goog-api-key",
+                "authorization"}``).  Pass ``None`` to disable encryption
+                entirely (e.g. local dev with a private Temporal server).
+            sensitive_activity_fields_encryption_key: A Fernet key for
+                encrypting the fields specified above.  Generate one with
+                ``cryptography.fernet.Fernet.generate_key()``.  Must be the
+                same across all workers and clients for a given namespace.
+                Required when ``sensitive_activity_fields`` is not ``None``.
             **gemini_client_kwargs: Forwarded to ``genai.Client()``.  Do NOT
                 pass ``http_options`` — the plugin manages it internally.
                 See ``genai.Client`` for available options (``api_key``,
@@ -92,11 +155,37 @@ class GeminiPlugin(SimplePlugin):
                 "args (api_key, vertexai, project, etc.) directly."
             )
 
-        # Create the genai.Client with temporal_http_options() so that all
-        # HTTP calls go through a Temporal activity.  This happens at worker
-        # startup (outside the sandbox) where os.environ is available.
+        # ── Build the DataConverter ──────────────────────────────────────
+        if sensitive_activity_fields is not None:
+            if sensitive_activity_fields_encryption_key is None:
+                raise ValueError(
+                    "sensitive_activity_fields_encryption_key is required when "
+                    "sensitive_activity_fields is set.\n\n" + _ENCRYPTION_KEY_HELP
+                )
+
+            from temporalio.contrib.google_gemini_sdk._sensitive_fields_codec import (
+                make_sensitive_fields_data_converter,
+            )
+
+            self._data_converter = make_sensitive_fields_data_converter(
+                model_configs={
+                    HttpRequestData: {"headers": sensitive_activity_fields},
+                },
+                encryption_key=sensitive_activity_fields_encryption_key,
+            )
+        else:
+            # No encryption — use plain Pydantic converter.
+            # Credential headers will be visible in Temporal's event history.
+            self._data_converter = DataConverter(
+                payload_converter_class=_DefaultPydanticPayloadConverter
+            )
+
+        # ── Create the genai.Client ──────────────────────────────────────
+        # Uses temporal_http_options() so all HTTP calls go through a Temporal
+        # activity.  Created at worker startup (outside the sandbox) where
+        # os.environ is available.
         #
-        # When no kwargs are provided (e.g. in test environments), skip client
+        # When no kwargs are provided (e.g. test environments), skip client
         # creation — get_gemini_client() will raise at workflow runtime.
         gemini_client = None
         if gemini_client_kwargs:
@@ -126,18 +215,11 @@ class GeminiPlugin(SimplePlugin):
                 return dataclasses.replace(
                     runner,
                     restrictions=runner.restrictions.with_passthrough_modules(
-                        # google.genai — so the workflow can call methods on the
-                        # pre-built genai.Client and use types.GenerateContentConfig
                         "google.genai",
                         "google.api_core",
-                        # pydantic internals — avoids "imported after initial
-                        # workflow load" warnings when google.genai types
-                        # trigger lazy pydantic schema compilation.
                         "pydantic_core",
                         "pydantic",
                         "annotated_types",
-                        # The client store module — passthrough'd so the sandbox
-                        # sees the same _gemini_client reference the worker set.
                         "temporalio.contrib.google_gemini_sdk._client_store",
                     ),
                 )
@@ -154,13 +236,36 @@ class GeminiPlugin(SimplePlugin):
     def _configure_data_converter(
         self, converter: DataConverter | None
     ) -> DataConverter:
-        if converter is None:
-            return DataConverter(
-                payload_converter_class=_DefaultPydanticPayloadConverter
-            )
-        elif converter.payload_converter_class is DefaultPayloadConverter:
-            return dataclasses.replace(
-                converter,
-                payload_converter_class=_DefaultPydanticPayloadConverter,
-            )
-        return converter
+        if converter is not None and converter.payload_codec is not None:
+            # Caller has their own codec — chain ours first, then theirs.
+            if self._data_converter.payload_codec is not None:
+                return dataclasses.replace(
+                    self._data_converter,
+                    payload_codec=_CompositeCodec(
+                        [self._data_converter.payload_codec, converter.payload_codec]
+                    ),
+                )
+        return self._data_converter
+
+
+class _CompositeCodec(PayloadCodec):
+    """Chains multiple codecs in order (encode: left→right, decode: right→left)."""
+
+    def __init__(self, codecs: list[PayloadCodec]) -> None:
+        self._codecs = codecs
+
+    async def encode(
+        self, payloads: Sequence[temporalio.api.common.v1.Payload]
+    ) -> list[temporalio.api.common.v1.Payload]:
+        result = list(payloads)
+        for codec in self._codecs:
+            result = await codec.encode(result)
+        return result
+
+    async def decode(
+        self, payloads: Sequence[temporalio.api.common.v1.Payload]
+    ) -> list[temporalio.api.common.v1.Payload]:
+        result = list(payloads)
+        for codec in reversed(self._codecs):
+            result = await codec.decode(result)
+        return result

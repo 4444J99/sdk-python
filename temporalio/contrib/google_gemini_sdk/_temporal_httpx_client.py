@@ -96,34 +96,15 @@ class TemporalHttpxClient(httpx.AsyncClient):
             # Prefer read timeout (waiting for response), fall back to pool
             timeout = timeout_ext.get("read") or timeout_ext.get("pool")
 
-        # ── Credential stripping ──────────────────────────────────────────
-        # The Gemini SDK injects "x-goog-api-key" into every outgoing request
-        # at genai.Client construction time.  Because the serialized
-        # HttpRequestData is stored in Temporal's event history (visible in the
-        # Temporal UI and accessible to anyone with namespace read access), we
-        # strip this header so the API key is never persisted.
-        #
-        # The matching activity (gemini_api_call) re-injects the API key
-        # from os.environ on the worker side before making the real HTTP call.
-        # See _http_activity.py for the other half.
-        #
-        # NOTE: We intentionally do NOT strip the "authorization" header
-        # (used by Vertex AI with OAuth / service-account credentials).
-        # OAuth tokens are short-lived and refreshed per-request by the SDK;
-        # we cannot re-inject them in the activity.  Vertex AI users should
-        # be aware that bearer tokens will appear in event history — use
-        # Temporal's payload codec / encryption if this is a concern.
-        # ─────────────────────────────────────────────────────────────────────
-        headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() != "x-goog-api-key"
-        }
+        # Headers are passed through as-is.  Sensitive headers (x-goog-api-key,
+        # authorization) are encrypted transparently by SensitiveFieldsCodec
+        # before the payload reaches Temporal's event history, and decrypted
+        # before the activity receives it.  No manual stripping needed.
 
         req_data = HttpRequestData(
             method=request.method,
             url=str(request.url),
-            headers=headers,
+            headers=dict(request.headers),
             content=content,
             timeout=timeout,
         )
