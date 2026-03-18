@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from typing import Any
 
-from google import genai
-
-from temporalio.contrib.google_gemini_sdk._invoke_model_activity import (
-    GeminiModelActivity,
-)
-from temporalio.contrib.google_gemini_sdk._model_activity_parameters import (
-    ModelActivityParameters,
-)
+from temporalio.contrib.google_gemini_sdk import _client_store
+from temporalio.contrib.google_gemini_sdk._http_activity import gemini_api_call
 from temporalio.contrib.google_gemini_sdk.workflow import GeminiAgentWorkflowError
 from temporalio.contrib.pydantic import (
     PydanticPayloadConverter as _DefaultPydanticPayloadConverter,
@@ -30,43 +24,41 @@ class GeminiPlugin(SimplePlugin):
         This class is experimental and may change in future versions.
         Use with caution in production environments.
 
-    This plugin configures:
-    - Pydantic Payload Converter (required for Gemini SDK types).
-    - Sandbox passthrough for ``google.genai`` and ``google.api_core`` modules.
-    - The ``generate_content_activity`` model invocation activity.
-    - ``GeminiAgentWorkflowError`` as a workflow failure exception type.
+    This plugin:
 
-    Example:
-        >>> plugin = GeminiPlugin()
-        >>> client = await Client.connect("localhost:7233", plugins=[plugin])
-        >>> async with Worker(
-        ...     client,
-        ...     task_queue="my-queue",
-        ...     workflows=[MyAgentWorkflow],
-        ...     activities=[my_tool_activity],
-        ... ):
-        ...     await asyncio.Event().wait()
+    - Stores the pre-built ``genai.Client`` so that workflows can retrieve it
+      via :func:`~temporalio.contrib.google_gemini_sdk.get_gemini_client`
+      without accessing ``os.environ`` or creating heavy objects in the sandbox.
+    - Registers ``gemini_api_call`` — the durable HTTP transport invoked
+      by :class:`~temporalio.contrib.google_gemini_sdk.TemporalHttpxClient`.
+    - Configures the Pydantic data converter and sandbox passthrough modules.
+
+    Example::
+
+        gemini_client = genai.Client(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            http_options=temporal_http_options(
+                start_to_close_timeout=timedelta(seconds=60),
+            ),
+        )
+        plugin = GeminiPlugin(gemini_client=gemini_client)
+        client = await Client.connect("localhost:7233", plugins=[plugin])
     """
 
     def __init__(
         self,
-        model_params: ModelActivityParameters | None = None,
-        client_factory: Callable[[], genai.Client] | None = None,
-        _model_activity: GeminiModelActivity | None = None,
+        gemini_client: Any,
     ) -> None:
         """Initialize the Gemini plugin.
 
         Args:
-            model_params: Optional default parameters for model activity execution.
-                Currently accepted but not applied automatically; pass ``model_params``
-                directly to :func:`~temporalio.contrib.google_gemini_sdk.workflow.run_agent`.
-            client_factory: Optional factory function for creating the Gemini client.
-                Defaults to reading ``GOOGLE_API_KEY`` from the environment.
-            _model_activity: Internal override for testing. Prefer using
-                :class:`~temporalio.contrib.google_gemini_sdk.testing.GeminiEnvironment`
-                instead of setting this directly.
+            gemini_client: A pre-built ``genai.Client`` instance.  Create it at
+                worker startup (where ``os.environ`` is available) with
+                ``http_options=temporal_http_options(...)`` so that its HTTP
+                calls are routed through Temporal activities.
         """
-        model_activity = _model_activity or GeminiModelActivity(client_factory)
+        # Store the client in the passthrough'd module so the sandbox can see it.
+        _client_store._gemini_client = gemini_client
 
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner:
             if not runner:
@@ -75,7 +67,19 @@ class GeminiPlugin(SimplePlugin):
                 return dataclasses.replace(
                     runner,
                     restrictions=runner.restrictions.with_passthrough_modules(
-                        "google.genai", "google.api_core"
+                        # google.genai — so the workflow can call methods on the
+                        # pre-built genai.Client and use types.GenerateContentConfig
+                        "google.genai",
+                        "google.api_core",
+                        # pydantic internals — avoids "imported after initial
+                        # workflow load" warnings when google.genai types
+                        # trigger lazy pydantic schema compilation.
+                        "pydantic_core",
+                        "pydantic",
+                        "annotated_types",
+                        # The client store module — passthrough'd so the sandbox
+                        # sees the same _gemini_client reference the worker set.
+                        "temporalio.contrib.google_gemini_sdk._client_store",
                     ),
                 )
             return runner
@@ -83,7 +87,7 @@ class GeminiPlugin(SimplePlugin):
         super().__init__(
             name="GeminiPlugin",
             data_converter=self._configure_data_converter,
-            activities=[model_activity.generate_content_activity],
+            activities=[gemini_api_call],
             workflow_runner=workflow_runner,
             workflow_failure_exception_types=[GeminiAgentWorkflowError],
         )

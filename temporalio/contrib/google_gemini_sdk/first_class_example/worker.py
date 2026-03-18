@@ -1,9 +1,17 @@
 # ABOUTME: First-class Temporal + Gemini SDK integration demo.
-# Demonstrates the clean developer experience: 3-line workflow, no manual loop,
-# no dynamic activities, no tool registry, and no inspect hackery.
+#
+# Key differences from example/durable_agent_worker.py:
+#   - AFC is ENABLED: Gemini's SDK owns the agentic loop, no manual while-True
+#   - Tools are plain @activity.defn functions; no registry, no dynamic activities
+#   - activity_as_tool() makes each tool call a durable Temporal activity
+#   - temporal_http_options() makes each model HTTP call a durable Temporal activity
+#   - genai.Client is created once in main(), stored via GeminiPlugin
+#   - Workflow retrieves it with get_gemini_client() — no os.environ in sandbox
+#   - No run_agent(), no inspect hackery, no print() logging
 
 import asyncio
 import json
+import os
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -15,8 +23,13 @@ from temporalio.worker import Worker
 
 with workflow.unsafe.imports_passed_through():
     import httpx
+    from google.genai import types
 
-from temporalio.contrib.google_gemini_sdk import GeminiAgent, GeminiPlugin, activity_as_tool, run_agent
+from temporalio.contrib.google_gemini_sdk import (
+    GeminiPlugin,
+    activity_as_tool,
+    get_gemini_client,
+)
 
 
 # =============================================================================
@@ -91,7 +104,7 @@ async def get_location_info(request: GetLocationRequest) -> str:
 
 
 # =============================================================================
-# Workflow — 3 lines of real logic, no manual loop, no print() debugging
+# Workflow — natural Gemini SDK usage; AFC drives the loop; all calls are durable
 # =============================================================================
 
 TASK_QUEUE = "gemini-first-class"
@@ -99,13 +112,22 @@ TASK_QUEUE = "gemini-first-class"
 
 @workflow.defn
 class WeatherAgentWorkflow:
-    """Durable agentic workflow powered by Gemini SDK and Temporal."""
+    """Durable agentic workflow powered by Gemini SDK and Temporal.
+
+    The Gemini SDK's automatic function calling (AFC) drives the multi-turn
+    agentic loop.  temporal_http_options() ensures every model HTTP call is a
+    durable Temporal activity.  activity_as_tool() ensures every tool invocation
+    is also a durable Temporal activity.  Together, every step of the agentic
+    loop is visible in the workflow event history and recoverable after a crash.
+    """
 
     @workflow.run
     async def run(self, query: str) -> str:
-        return await run_agent(
-            GeminiAgent(
-                model="gemini-2.5-flash",
+        client = get_gemini_client()
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=query,
+            config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTIONS,
                 tools=[
                     activity_as_tool(
@@ -122,19 +144,30 @@ class WeatherAgentWorkflow:
                     ),
                 ],
             ),
-            query,
         )
+        return response.text
 
 
 # =============================================================================
-# Worker — register plugin + user activities, nothing else required
+# Worker — create client once, pass to plugin, start worker
 # =============================================================================
 
 
 async def main() -> None:
     load_dotenv()
 
-    plugin = GeminiPlugin()
+    # Import here so it's outside the sandbox (only main() runs outside).
+    from google.genai import Client as GeminiClient
+    from temporalio.contrib.google_gemini_sdk import temporal_http_options
+
+    gemini_client = GeminiClient(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        http_options=temporal_http_options(
+            start_to_close_timeout=timedelta(seconds=60),
+        ),
+    )
+
+    plugin = GeminiPlugin(gemini_client=gemini_client)
 
     config = ClientConfig.load_client_connect_config()
     config.setdefault("target_host", "localhost:7233")
