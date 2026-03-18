@@ -1,0 +1,11 @@
+set dotenv-filename := ".env.local"
+set dotenv-load
+
+run:
+    uv run python test_gemini.py
+
+worker:
+    uv run python first_class_example/worker.py
+
+query q="What's the weather right now?":
+    uv run python first_class_example/start_workflow.py "{{q}}"
