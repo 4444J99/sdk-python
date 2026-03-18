@@ -8,24 +8,18 @@ This integration lets you use the Gemini SDK **exactly as you normally would**
 while making every network call and every tool invocation **durable Temporal
 activities**.
 
-- :func:`temporal_http_options` — wrap ``genai.Client`` so all HTTP calls
-  (model calls, streaming responses) are routed through a Temporal activity.
+- :class:`GeminiPlugin` — creates and owns the ``genai.Client``, registers
+  the HTTP transport activity, and configures the worker.  Pass the same args
+  you would pass to ``genai.Client()`` — the plugin handles ``http_options``
+  internally.
 - :func:`activity_as_tool` — convert any ``@activity.defn`` function into a
   Gemini tool callable; Gemini's AFC invokes it as a Temporal activity.
-- :class:`GeminiPlugin` — stores the pre-built client, registers the HTTP
-  transport activity, and configures the worker.
 - :func:`get_gemini_client` — retrieve the client inside a workflow.
 
 Quickstart::
 
     # ---- worker setup (outside sandbox) ----
-    gemini_client = genai.Client(
-        api_key=os.environ["GOOGLE_API_KEY"],
-        http_options=temporal_http_options(
-            start_to_close_timeout=timedelta(seconds=60),
-        ),
-    )
-    plugin = GeminiPlugin(gemini_client=gemini_client)
+    plugin = GeminiPlugin(api_key=os.environ["GOOGLE_API_KEY"])
 
     @activity.defn
     async def get_weather(state: str) -> str: ...
@@ -51,7 +45,23 @@ Quickstart::
             return response.text
 """
 
-# --- Sandbox-safe imports (loaded eagerly) ---
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+# --- Type-checking imports (never executed at runtime) ---
+# These give IDEs and type checkers full visibility into the lazy-loaded
+# symbols so that autocomplete, go-to-definition, and hover docs work.
+if TYPE_CHECKING:
+    from temporalio.contrib.google_gemini_sdk._gemini_plugin import (
+        GeminiPlugin as GeminiPlugin,
+    )
+    from temporalio.contrib.google_gemini_sdk._temporal_httpx_client import (
+        TemporalHttpxClient as TemporalHttpxClient,
+        temporal_http_options as temporal_http_options,
+    )
+
+# --- Sandbox-safe imports (loaded eagerly at runtime) ---
 # These modules have NO httpx / google.genai imports and are safe to load
 # inside the Temporal workflow sandbox.
 from temporalio.contrib.google_gemini_sdk._client_store import get_gemini_client

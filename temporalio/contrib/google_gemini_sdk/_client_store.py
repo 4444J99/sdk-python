@@ -6,20 +6,23 @@ passthrough'd, the module-level ``_gemini_client`` variable is shared between
 the real runtime (where the worker sets it) and the sandboxed workflow (where
 :func:`get_gemini_client` reads it).
 
-This module intentionally has **no** ``httpx`` or ``google.genai`` imports so
-that it can also be loaded safely by the sandbox's restricted importer if the
-passthrough hasn't been configured yet.
+This module intentionally has **no** runtime ``httpx`` or ``google.genai``
+imports so that it can also be loaded safely by the sandbox's restricted
+importer if the passthrough hasn't been configured yet.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from google.genai import Client as _GeminiClient
 
 # Set by GeminiPlugin.__init__ before the worker starts.
-_gemini_client: Any = None
+_gemini_client: _GeminiClient | None = None
 
 
-def get_gemini_client() -> Any:
+def get_gemini_client() -> _GeminiClient:
     """Return the ``genai.Client`` stored by :class:`GeminiPlugin`.
 
     .. warning::

@@ -123,6 +123,12 @@ class WeatherAgentWorkflow:
 
     @workflow.run
     async def run(self, query: str) -> str:
+        # Retrieve the pre-built genai.Client that was created at worker
+        # startup and stored via GeminiPlugin.  We cannot instantiate
+        # genai.Client here because its constructor always reads os.environ
+        # (for the API key, project ID, etc.), which Temporal's workflow
+        # sandbox forbids.  get_gemini_client() reads from a passthrough'd
+        # module, so the sandbox sees the real, pre-configured client object.
         client = get_gemini_client()
         response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
@@ -149,25 +155,26 @@ class WeatherAgentWorkflow:
 
 
 # =============================================================================
-# Worker — create client once, pass to plugin, start worker
+# Worker — plugin owns client creation, start worker
 # =============================================================================
 
 
 async def main() -> None:
     load_dotenv()
 
-    # Import here so it's outside the sandbox (only main() runs outside).
-    from google.genai import Client as GeminiClient
-    from temporalio.contrib.google_gemini_sdk import temporal_http_options
-
-    gemini_client = GeminiClient(
+    # GeminiPlugin creates the genai.Client internally, ensuring it is always
+    # wired with temporal_http_options() so every LLM HTTP call runs as a
+    # durable Temporal activity.  Pass the same args you'd pass to
+    # genai.Client() — the plugin handles http_options for you.
+    #
+    # The client is created here (at worker startup, outside the sandbox)
+    # because genai.Client() reads os.environ internally, which Temporal's
+    # workflow sandbox forbids.  Workflows retrieve the pre-built client
+    # via get_gemini_client().
+    plugin = GeminiPlugin(
         api_key=os.environ["GOOGLE_API_KEY"],
-        http_options=temporal_http_options(
-            start_to_close_timeout=timedelta(seconds=60),
-        ),
+        start_to_close_timeout=timedelta(seconds=60),
     )
-
-    plugin = GeminiPlugin(gemini_client=gemini_client)
 
     config = ClientConfig.load_client_connect_config()
     config.setdefault("target_host", "localhost:7233")
