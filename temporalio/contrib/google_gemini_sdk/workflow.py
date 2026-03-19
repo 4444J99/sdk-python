@@ -10,13 +10,21 @@ from __future__ import annotations
 
 import functools
 import inspect
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
-from collections.abc import Callable
+
+import google.auth.credentials
+from google.genai import Client as GeminiClient
+from google.genai.client import DebugConfig
+from google.genai.types import HttpOptions, HttpOptionsDict
 
 from temporalio import activity
 from temporalio import workflow as temporal_workflow
 from temporalio.common import Priority, RetryPolicy
+from temporalio.contrib.google_gemini_sdk._temporal_httpx_client import (
+    temporal_http_options,
+)
 from temporalio.exceptions import ApplicationError, TemporalError
 from temporalio.workflow import ActivityCancellationType, VersioningIntent
 
@@ -122,6 +130,27 @@ def activity_as_tool(
     wrapper.__annotations__ = getattr(schema_fn, "__annotations__", {})
 
     return wrapper
+
+
+def gemini_client(
+    *,
+    vertexai: bool | None = None,
+    api_key: str | None = None,
+    credentials: google.auth.credentials.Credentials | None = None,
+    project: str | None = None,
+    location: str | None = None,
+    debug_config: DebugConfig | None = None,
+    http_options: HttpOptions | HttpOptionsDict | None = None,
+) -> GeminiClient:
+    return GeminiClient(
+        http_options=temporal_http_options(http_options=http_options),
+        vertexai=vertexai,
+        api_key=api_key,
+        credentials=credentials,
+        project=project,
+        location=location,
+        debug_config=debug_config,
+    )
 
 
 class GeminiAgentWorkflowError(TemporalError):

@@ -69,13 +69,11 @@ class TypeTaggingPydanticJSONConverter(PydanticJSONPlainPayloadConverter):
         super().__init__(to_json_options)
         self._watched = watched_types
 
-    def to_payload(
-        self, value: Any
-    ) -> temporalio.api.common.v1.Payload | None:
+    def to_payload(self, value: Any) -> temporalio.api.common.v1.Payload | None:
         payload = super().to_payload(value)
         if payload is not None and isinstance(value, tuple(self._watched)):
-            payload.metadata[TYPE_TAG_METADATA_KEY] = (
-                type(value).__qualname__.encode("utf-8")
+            payload.metadata[TYPE_TAG_METADATA_KEY] = type(value).__qualname__.encode(
+                "utf-8"
             )
         return payload
 
@@ -114,8 +112,7 @@ class SensitiveFieldsCodec(PayloadCodec):
                 one with ``cryptography.fernet.Fernet.generate_key()``.
         """
         self._configs: dict[str, dict[str, set[str]]] = {
-            t.__qualname__: fields_config
-            for t, fields_config in model_configs.items()
+            t.__qualname__: fields_config for t, fields_config in model_configs.items()
         }
         self._fernet = Fernet(encryption_key)
 

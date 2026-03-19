@@ -12,14 +12,15 @@ from typing import Any
 
 import httpx
 from google.genai import types
+from google.genai.types import HttpOptions, HttpOptionsDict
 
 from temporalio import workflow as temporal_workflow
 from temporalio.common import RetryPolicy
-
 from temporalio.contrib.google_gemini_sdk._http_activity import (
     HttpRequestData,
     gemini_api_call,
 )
+from temporalio.workflow import ActivityConfig
 
 
 class _NoOpAsyncTransport(httpx.AsyncBaseTransport):
@@ -58,20 +59,14 @@ class TemporalHttpxClient(httpx.AsyncClient):
     def __init__(
         self,
         *,
-        start_to_close_timeout: timedelta | None = timedelta(seconds=60),
-        schedule_to_close_timeout: timedelta | None = None,
-        heartbeat_timeout: timedelta | None = None,
-        retry_policy: RetryPolicy | None = None,
+        activity_config: ActivityConfig | None = None,
     ) -> None:
         # Use a no-op transport to avoid SSL cert file I/O at construction time.
         # The transport is never invoked because send() is fully overridden.
         super().__init__(transport=_NoOpAsyncTransport())
-        self._activity_kwargs: dict[str, Any] = {
-            "start_to_close_timeout": start_to_close_timeout,
-            "schedule_to_close_timeout": schedule_to_close_timeout,
-            "heartbeat_timeout": heartbeat_timeout,
-            "retry_policy": retry_policy,
-        }
+        self._activity_config = activity_config or ActivityConfig(
+            start_to_close_timeout=timedelta(seconds=60)
+        )  # TODO do we want to merge if start to close timeout not set
 
     async def send(
         self,
@@ -112,7 +107,7 @@ class TemporalHttpxClient(httpx.AsyncClient):
         resp_data = await temporal_workflow.execute_activity(
             gemini_api_call,
             req_data,
-            **self._activity_kwargs,
+            **self._activity_config,
         )
 
         return httpx.Response(
@@ -123,12 +118,15 @@ class TemporalHttpxClient(httpx.AsyncClient):
         )
 
 
+class SyncTemporalHttpxClient(httpx.Client):
+    def __init__(self):
+        pass
+
+
 def temporal_http_options(
     *,
-    start_to_close_timeout: timedelta = timedelta(seconds=60),
-    schedule_to_close_timeout: timedelta | None = None,
-    heartbeat_timeout: timedelta | None = None,
-    retry_policy: RetryPolicy | None = None,
+    http_options: HttpOptions | HttpOptionsDict | None = None,
+    activity_config: ActivityConfig | None = None,
 ) -> types.HttpOptions:
     """Create ``HttpOptions`` that route all Gemini SDK HTTP calls through Temporal.
 
@@ -177,12 +175,8 @@ def temporal_http_options(
                 return response.text
     """
     return types.HttpOptions(
-        httpx_async_client=TemporalHttpxClient(
-            start_to_close_timeout=start_to_close_timeout,
-            schedule_to_close_timeout=schedule_to_close_timeout,
-            heartbeat_timeout=heartbeat_timeout,
-            retry_policy=retry_policy,
-        ),
+        httpx_async_client=TemporalHttpxClient(activity_config=activity_config),
+        httpx_client=SyncTemporalHttpxClient(),
         # Temporal owns retries; disable SDK-level retries to avoid interference.
         retry_options=types.HttpRetryOptions(attempts=1),
     )

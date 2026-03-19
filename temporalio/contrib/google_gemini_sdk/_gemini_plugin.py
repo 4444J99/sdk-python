@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import timedelta
-from typing import Any
+from typing import Any, Sequence
 
+import temporalio.api.common.v1
 from temporalio.common import RetryPolicy
-from temporalio.contrib.google_gemini_sdk import _client_store
 from temporalio.contrib.google_gemini_sdk._http_activity import (
     HttpRequestData,
     gemini_api_call,
@@ -16,10 +16,7 @@ from temporalio.contrib.google_gemini_sdk.workflow import GeminiAgentWorkflowErr
 from temporalio.contrib.pydantic import (
     PydanticPayloadConverter as _DefaultPydanticPayloadConverter,
 )
-from typing import Sequence
-
-import temporalio.api.common.v1
-from temporalio.converter import DataConverter, DefaultPayloadConverter, PayloadCodec
+from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.plugin import SimplePlugin
 from temporalio.worker import WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
@@ -180,34 +177,6 @@ class GeminiPlugin(SimplePlugin):
                 payload_converter_class=_DefaultPydanticPayloadConverter
             )
 
-        # ── Create the genai.Client ──────────────────────────────────────
-        # Uses temporal_http_options() so all HTTP calls go through a Temporal
-        # activity.  Created at worker startup (outside the sandbox) where
-        # os.environ is available.
-        #
-        # When no kwargs are provided (e.g. test environments), skip client
-        # creation — get_gemini_client() will raise at workflow runtime.
-        gemini_client = None
-        if gemini_client_kwargs:
-            from google.genai import Client as GeminiClient
-
-            from temporalio.contrib.google_gemini_sdk._temporal_httpx_client import (
-                temporal_http_options,
-            )
-
-            gemini_client = GeminiClient(
-                http_options=temporal_http_options(
-                    start_to_close_timeout=start_to_close_timeout,
-                    schedule_to_close_timeout=schedule_to_close_timeout,
-                    heartbeat_timeout=heartbeat_timeout,
-                    retry_policy=retry_policy,
-                ),
-                **gemini_client_kwargs,
-            )
-
-        # Store the client in the passthrough'd module so the sandbox can see it.
-        _client_store._gemini_client = gemini_client
-
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner:
             if not runner:
                 raise ValueError("No WorkflowRunner provided to GeminiPlugin.")
@@ -215,12 +184,7 @@ class GeminiPlugin(SimplePlugin):
                 return dataclasses.replace(
                     runner,
                     restrictions=runner.restrictions.with_passthrough_modules(
-                        "google.genai",
-                        "google.api_core",
-                        "pydantic_core",
-                        "pydantic",
-                        "annotated_types",
-                        "temporalio.contrib.google_gemini_sdk._client_store",
+                        "google.genai"
                     ),
                 )
             return runner

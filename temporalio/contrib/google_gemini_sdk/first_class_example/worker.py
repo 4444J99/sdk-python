@@ -15,7 +15,10 @@ import os
 from datetime import timedelta
 
 from dotenv import load_dotenv
+from google.genai import types
 from pydantic import BaseModel, Field
+
+import temporalio.contrib.google_gemini_sdk.workflow
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.envconfig import ClientConfig
@@ -23,14 +26,8 @@ from temporalio.worker import Worker
 
 with workflow.unsafe.imports_passed_through():
     import httpx
-    from google.genai import types
 
-from temporalio.contrib.google_gemini_sdk import (
-    GeminiPlugin,
-    activity_as_tool,
-    get_gemini_client,
-)
-
+from temporalio.contrib.google_gemini_sdk import GeminiPlugin, activity_as_tool
 
 # =============================================================================
 # System Instructions
@@ -122,14 +119,14 @@ class WeatherAgentWorkflow:
     """
 
     @workflow.run
-    async def run(self, query: str) -> str:
+    async def run(self, query: str) -> str | None:
         # Retrieve the pre-built genai.Client that was created at worker
         # startup and stored via GeminiPlugin.  We cannot instantiate
         # genai.Client here because its constructor always reads os.environ
         # (for the API key, project ID, etc.), which Temporal's workflow
         # sandbox forbids.  get_gemini_client() reads from a passthrough'd
         # module, so the sandbox sees the real, pre-configured client object.
-        client = get_gemini_client()
+        client = temporalio.contrib.google_gemini_sdk.workflow.gemini_client()
         response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=query,
